@@ -132,7 +132,9 @@ async function uploadPhotos(rowKey, photos) {
   return out;
 }
 async function sync(manual) {
-  if (S.syncing || !navigator.onLine || !account) { if (manual && !navigator.onLine) toast("No signal – changes stay on this phone and send later."); return; }
+  if (S.syncing) { S.again = true; return; }
+  if (!navigator.onLine || !account) { if (manual && !navigator.onLine) toast("No signal – changes stay on this phone and send later."); return; }
+  S.again = false;
   S.syncing = true; paintChip();
   let sent = 0, failed = 0;
   try {
@@ -161,7 +163,7 @@ async function sync(manual) {
     S.lastSync = new Date().toISOString(); await meta.set("lastSync", S.lastSync);
     if (manual || sent) toast(failed ? `${sent} sent, ${failed} will retry` : sent ? `${sent} change${sent > 1 ? "s" : ""} sent` : "Up to date");
   } catch (e) { console.error(e); if (manual) toast("Couldn't reach SharePoint – will try again"); }
-  finally { S.syncing = false; paintChip(); route(); }
+  finally { S.syncing = false; paintChip(); if (!document.activeElement || !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) route(); if (S.again || (sent && S.outbox.length)) setTimeout(() => sync(), 300); }
 }
 
 /* ---------------- photos ---------------- */
@@ -329,7 +331,7 @@ function vAdd(loc) {
     <h1>New works to go item</h1>
     <div class="where"><span>Where (filled in from the room)</span><b>${esc(r.Room)}${r.Zone ? " · Zone " + esc(r.Zone) : ""} · ${esc(r.Building)} · ${esc(r.Floor)}</b></div>
     <label class="field"><span class="lab" style="margin:0">What needs doing</span><textarea id="ds" placeholder="e.g. Door signage to install"></textarea></label>
-    <div class="grid g2"><label class="field"><span class="lab" style="margin:0">Package</span><select id="pk">${pkgs.map(p => `<option>${esc(p)}</option>`).join("")}</select></label>
+    <div class="grid g2"><label class="field"><span class="lab" style="margin:0">Package</span><select id="pk"><option value="">Choose…</option>${pkgs.map(p => `<option>${esc(p)}</option>`).join("")}</select></label>
       <label class="field"><span class="lab" style="margin:0">System</span><select id="sy"></select></label></div>
     <div class="grid g2"><label class="field"><span class="lab" style="margin:0">Work owner</span><input id="wo" value="${esc(r.WorkOwner || "")}"></label>
       <label class="field"><span class="lab" style="margin:0">Target date</span><input id="td" type="date" value="${t14}"></label></div>
@@ -341,6 +343,7 @@ function vAdd(loc) {
   photoPicker($("#ph"), photos, []);
   $("#sv").onclick = async () => {
     const ds = $("#ds").value.trim(); if (!ds) { toast("Say what needs doing"); $("#ds").focus(); return; }
+    if (!$("#pk").value) { toast("Choose the package"); $("#pk").focus(); return; }
     const rowKey = uid();
     const fields = { ItemType: "Works to Go", Descr: ds, Building: r.Building, Floor: r.Floor, Room: r.Room, Zone: r.Zone || "", Package: $("#pk").value,
       SystemName: $("#sy").value, WorkOwner: $("#wo").value.trim(), UCBResp: r.UCBResp || "", UCBResp2: r.UCBResp2 || "", DateRaised: todayISO(),
