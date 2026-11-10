@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Apple Site Capture</title>
+<meta name="theme-color" content="#0E2A47">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Site Capture">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="t1">Project Apple · Site Capture</span>
+    <span class="t2">UCB · works to go</span>
+  </div>
+  <button id="netchip" class="chip" type="button" aria-label="Sync status"></button>
+</header>
+<main id="view" aria-live="polite"></main>
+<nav class="bottom" id="nav">
+  <a href="#/" data-tab="rooms">Rooms</a>
+  <a href="#/outbox" data-tab="outbox" id="navout">Outbox</a>
+</nav>
+<div id="toast" role="status"></div>
+<script src="config.js"></script>
+<script src="vendor/msal-browser.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
