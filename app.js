@@ -1,5 +1,5 @@
 /* Project Apple · Site Capture – works-to-go capture app (offline-first PWA, Microsoft 365 / SharePoint back end)
-   Project Central Assurance, Nov 2026 */
+   Project Central Assurance, Nov 2026.  v1.1: progress is logged per activity per room on a slider (Progress %, 0 to 100). */
 (() => {
 "use strict";
 const C = window.APP_CONFIG;
@@ -7,7 +7,12 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 const SCOPES = ["Sites.ReadWrite.All", "User.Read"];
 const STATUSES = ["Open", "In Progress", "Closed", "On Hold", "At Risk", "Not applicable"];
 const FIELDS = ["Title","ItemType","Descr","Building","Floor","Room","Zone","Package","SystemName","WorkOwner","UCBResp","UCBResp2","Cat",
-  "DateRaised","TargetDate","ItemStatus","ClosureDate","Notes","SourceRef","LocationID","RowKey","LastBy","LastAt","PhotoIds"];
+  "DateRaised","TargetDate","ItemStatus","ClosureDate","Notes","SourceRef","LocationID","RowKey","LastBy","LastAt","PhotoIds","Activity","Progress"];
+/* The activity list (Parameters tab of the tracker, Seamus's list of 15 Nov 2026): order on screen and discipline. */
+const ACT = [["Lighting 1st Fix","Electrical"],["Lighting 2nd Fix","Electrical"],["Power 1st Fix","Electrical"],["Power 2nd Fix","Electrical"],["Fire Alarm 1st Fix","Electrical"],["Fire Alarm 2nd Fix","Electrical"],["Data 1st Fix","Electrical"],["Data 2nd Fix","Electrical"],["Earthing 1st Fix","Electrical"],["Earthing 2nd Fix","Electrical"],["Door Access Control 1st Fix","Electrical"],["Door Access Control 2nd Fix","Electrical"],["Sprinkler 1st Fix","Mechanical"],["Sprinkler 2nd Fix","Mechanical"],["LTHW 1st Fix","Mechanical"],["LTHW 2nd Fix","Mechanical"],["CHW 1st Fix","Mechanical"],["CHW 2nd Fix","Mechanical"],["Lab Gases 1st Fix","Mechanical"],["Lab Gases 2nd Fix","Mechanical"],["Compressed Air 1st Fix","Mechanical"],["Compressed Air 2nd Fix","Mechanical"],["Ventilation 1st Fix","Mechanical"],["Ventilation 2nd Fix","Mechanical"],["Sprinkler Mist 1st Fix","Mechanical"],["Sprinkler Mist 2nd Fix","Mechanical"],["Drainage 1st Fix","Mechanical"],["Drainage 2nd Fix","Mechanical"],["Containment","BMS"],["Cabling","BMS"],["Panel Terminations","BMS"],["Field Terminations","BMS"],["IO Test","BMS"],["Ceiling 1st Fix","CSA"],["Ceiling 2nd Fix","CSA"],["Flooring / Carpet / Vinyl","CSA"],["Door Install 1st Fix","CSA"],["Door Install 2nd Fix","CSA"],["Painting","CSA"],["Skirting Board","CSA"],["Architrave","CSA"],["BASWA 1st Fix","CSA"],["BASWA 2nd Fix","CSA"],["RAF Install","CSA"],["IPS 1st Fix","Furniture"],["IPS 2nd Fix","Furniture"],["Lab Furniture 1st Fix","Furniture"],["Lab Furniture 2nd Fix","Furniture"],["Office Furniture 1st Fix","Furniture"],["Office Furniture 2nd Fix","Furniture"]];
+const ACT_IX = new Map(ACT.map((a, k) => [a[0], { k, d: a[1] }]));
+const DISCS = ["Electrical", "Mechanical", "BMS", "CSA", "Furniture", "Other"];
+const HOLDS = ["On Hold", "At Risk", "Not applicable"];
 const ROOMF = ["Title","Building","Floor","Room","Zone","WorkOwner","UCBResp","UCBResp2"];
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -41,7 +46,9 @@ const delOne = (store, k) => tx(store, "readwrite", s => req(s.delete(k)));
 const meta = { get: k => tx("meta", "readonly", s => req(s.get(k))), set: (k, v) => tx("meta", "readwrite", s => req(s.put(v, k))) };
 
 /* ---------------- state ---------------- */
-const S = { items: new Map(), rooms: new Map(), outbox: [], user: null, syncing: false, lastSync: null, filter: { b: null, f: null, q: "" }, roomPill: "All" };
+let ITEMV = 0;                                             // bumped whenever an item changes, so the by-room index is rebuilt only when needed
+class VMap extends Map { set(k, v) { ITEMV++; return super.set(k, v); } delete(k) { ITEMV++; return super.delete(k); } }
+const S = { items: new VMap(), rooms: new Map(), outbox: [], user: null, syncing: false, lastSync: null, filter: { b: null, f: null, q: "" }, roomDisc: {} };
 async function loadLocal() {
   (await getAll("items")).forEach(i => S.items.set(i.RowKey, i));
   (await getAll("rooms")).forEach(r => S.rooms.set(r.Title, r));
@@ -120,7 +127,8 @@ async function refresh() {
 
 /* ---------------- outbox ---------------- */
 async function queue(op) { op.at = new Date().toISOString(); op.by = S.user ? S.user.email : ""; const qid = await putOne("outbox", op); op.qid = qid; S.outbox.push(op); paintChip(); }
-function nextId() { let m = 0; for (const i of S.items.values()) { const n = /^WTG-(\d+)$/.exec(i.Title || ""); if (n) m = Math.max(m, +n[1]); } return "WTG-" + String(m + 1).padStart(4, "0"); }
+function nextId() { let m = (C.newIdsFrom || 1) - 1;       // items raised in the app are numbered clear of the tracker's own numbers
+  for (const i of S.items.values()) { const n = /^WTG-(\d+)$/.exec(i.Title || ""); if (n) m = Math.max(m, +n[1]); } return "WTG-" + String(m + 1).padStart(4, "0"); }
 async function uploadPhotos(rowKey, photos) {
   const out = [];
   for (let n = 0; n < photos.length; n++) {
@@ -156,14 +164,15 @@ async function sync(manual) {
           const local = { ...item, ...fields }; S.items.set(op.rowKey, local); await putOne("items", local);
         }
         await delOne("outbox", op.qid); S.outbox = S.outbox.filter(o => o.qid !== op.qid);
-        const sentLog = (await meta.get("sent")) || []; sentLog.unshift({ at: new Date().toISOString(), what: op.label, room: op.room });
+        const sentLog = (await meta.get("sent")) || []; sentLog.unshift({ at: new Date().toISOString(), what: op.label, room: op.detail || op.room });
         await meta.set("sent", sentLog.slice(0, 30)); sent++;
       } catch (e) { console.error(e); failed++; }
     }
     S.lastSync = new Date().toISOString(); await meta.set("lastSync", S.lastSync);
     if (manual || sent) toast(failed ? `${sent} sent, ${failed} will retry` : sent ? `${sent} change${sent > 1 ? "s" : ""} sent` : "Up to date");
   } catch (e) { console.error(e); if (manual) toast("Couldn't reach SharePoint – will try again"); }
-  finally { S.syncing = false; paintChip(); if (!document.activeElement || !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) route(); if (S.again || (sent && S.outbox.length)) setTimeout(() => sync(), 300); }
+  // the screen is redrawn after a sync, except one somebody is filling in (an activity or a new item)
+  finally { S.syncing = false; paintChip(); if (!/^#\/(item|add)\//.test(location.hash) && (!document.activeElement || !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))) route(); if (S.again || (sent && S.outbox.length)) setTimeout(() => sync(), 300); }
 }
 
 /* ---------------- photos ---------------- */
@@ -180,7 +189,17 @@ const BAND = p => p >= 100 ? "var(--b100)" : p >= 75 ? "var(--b75)" : p >= 50 ? 
 const SHORT = b => String(b || "").replace("Building ", "").replace(" Annex", " Annexe");
 const FLOOR_ORDER = ["LGF", "GF", "UGF", "Mezz", "Plant / Switch Room", "Interstitial", "Roof", "All"];
 const counted = i => i.ItemStatus !== "Not applicable";
-function roomStats(loc) { let t = 0, c = 0, o = 0; for (const i of S.items.values()) if (i.LocationID === loc && counted(i)) { t++; if (i.ItemStatus === "Closed") c++; else o++; } return { t, c, o }; }
+const discOf = i => (ACT_IX.get(i.Activity) || {}).d || (DISCS.includes(i.Package) ? i.Package : "Other");   // items with no listed activity sit under their package
+const ordOf = i => (ACT_IX.get(i.Activity) || { k: 999 }).k;
+const nameOf = i => i.Activity || i.Descr || "(no description)";
+const pctOf = i => typeof i.Progress === "number" ? Math.max(0, Math.min(100, i.Progress)) : (i.ItemStatus === "Closed" ? 100 : 0);   // Closed counts as 100%, as on the tracker
+const pctTxt = p => (Math.round(p * 10) / 10) + "%";
+let LOCV = -1, LOC = new Map();
+function byLoc(loc) {
+  if (LOCV !== ITEMV) { LOC = new Map(); for (const i of S.items.values()) { const a = LOC.get(i.LocationID); if (a) a.push(i); else LOC.set(i.LocationID, [i]); } LOCV = ITEMV; }
+  return LOC.get(loc) || [];
+}
+function roomStats(loc) { let t = 0, c = 0, o = 0, sum = 0; for (const i of byLoc(loc)) if (counted(i)) { t++; sum += pctOf(i); if (i.ItemStatus === "Closed") c++; else o++; } return { t, c, o, p: t ? Math.round(sum / t) : 0, sum }; }
 function pending(rowKey) { return S.outbox.some(o => o.rowKey === rowKey); }
 const chev = '<svg class="chev" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
 const backI = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
@@ -224,15 +243,15 @@ function vRooms() {
   if (!list.length) html += `<div class="empty">No rooms match.</div>`;
   for (const [z, rs] of [...zones.entries()].sort()) {
     rs.sort((a, b) => String(a.Room).localeCompare(String(b.Room)));
-    let zt = 0, zc = 0; rs.forEach(r => { const s = roomStats(r.Title); zt += s.t; zc += s.c; });
-    html += `<div class="zonehd"><b>${esc(z)}</b><span class="sub">${rs.length} rooms · ${zc} of ${zt} closed${zt ? ` (${Math.round(zc / zt * 100)}%)` : ""}</span></div><div class="list">`;
-    for (const r of rs) { const s = roomStats(r.Title); const p = s.t ? Math.round(s.c / s.t * 100) : 0;
+    let zt = 0, zs = 0; rs.forEach(r => { const s = roomStats(r.Title); zt += s.t; zs += s.sum; });
+    html += `<div class="zonehd"><b>${esc(z)}</b><span class="sub">${rs.length} rooms${zt ? ` · ${Math.round(zs / zt)}% done` : ""}</span></div><div class="list">`;
+    for (const r of rs) { const s = roomStats(r.Title); const p = s.p;
       html += `<a class="row" href="#/room/${encodeURIComponent(r.Title)}"><span class="grow"><span class="nm">${esc(r.Room)}</span>
         <span class="bar" aria-hidden="true"><span style="width:${Math.max(p, 3)}%;background:${BAND(p)}"></span></span></span>
-        <span class="cnt">${s.c} of ${s.t} closed<br><span class="s">${s.o} open</span></span>${chev}</a>`; }
+        <span class="cnt"><b class="pct">${p}%</b><br><span class="s">${s.c} of ${s.t} closed</span></span>${chev}</a>`; }
     html += `</div>`;
   }
-  html += `<div class="legend"><span>Bar = share closed:</span><span><i style="background:var(--b0)"></i>0–24%</span><span><i style="background:var(--b25)"></i>25–49%</span><span><i style="background:var(--b50)"></i>50–74%</span><span><i style="background:var(--b75)"></i>75–99%</span><span><i style="background:var(--b100)"></i>100%</span></div>`;
+  html += `<div class="legend"><span>Bar = average progress:</span><span><i style="background:var(--b0)"></i>0–24%</span><span><i style="background:var(--b25)"></i>25–49%</span><span><i style="background:var(--b50)"></i>50–74%</span><span><i style="background:var(--b75)"></i>75–99%</span><span><i style="background:var(--b100)"></i>100%</span></div>`;
   $("#view").innerHTML = html;
   $("#view").querySelectorAll("[data-b]").forEach(b => b.onclick = () => { S.filter = { b: b.dataset.b, f: null, q: "" }; meta.set("filter", S.filter); vRooms(); });
   $("#view").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { S.filter.f = b.dataset.f; S.filter.q = ""; meta.set("filter", S.filter); vRooms(); });
@@ -242,22 +261,26 @@ function vRooms() {
 function vRoom(loc) {
   setTab("rooms");
   const r = S.rooms.get(loc); if (!r) return vRooms();
-  const items = [...S.items.values()].filter(i => i.LocationID === loc).sort((a, b) => String(a.Title).localeCompare(String(b.Title)));
+  const items = byLoc(loc).slice().sort((a, b) => ordOf(a) - ordOf(b) || String(a.Title).localeCompare(String(b.Title), "en", { numeric: true }));
   const s = roomStats(loc);
-  const cnt = st => items.filter(i => (i.ItemStatus || "Open") === st).length;
-  const pills = ["All", "Open", "In Progress", "Closed"].concat(["On Hold", "At Risk", "Not applicable"].filter(cnt));
-  const pill = S.roomPill;
-  const shown = pill === "All" ? items : items.filter(i => (i.ItemStatus || "Open") === pill);
+  const discs = DISCS.filter(d => items.some(i => discOf(i) === d));
+  let disc = S.roomDisc[loc]; if (!discs.includes(disc)) disc = discs[0];
+  const shown = items.filter(i => discOf(i) === disc);
   $("#view").innerHTML = `<a class="back" href="#/">${backI} ${esc(SHORT(r.Building))} · ${esc(r.Floor)} rooms</a>
     <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap">
-      <div><h1>${esc(r.Room)}</h1><div class="sub">${r.Zone ? "Zone " + esc(r.Zone) + " · " : ""}work owner ${esc(r.WorkOwner || "–")} · UCB ${esc(r.UCBResp || "–")}</div></div>
-      <div style="text-align:right"><div style="font-size:28px;font-weight:700">${s.c} of ${s.t}</div><div class="sub">activities closed</div></div></div>
-    <div style="margin-top:14px"><a class="big amber" href="#/add/${encodeURIComponent(loc)}">＋ Add works to go item</a></div>
-    <div class="pills">${pills.map(p => `<button type="button" class="pill ${p === pill ? "sel" : ""}" data-p="${esc(p)}">${esc(p)} · ${p === "All" ? items.length : cnt(p)}</button>`).join("")}</div>
-    <div class="list">${shown.map(i => `<a class="row" href="#/item/${encodeURIComponent(i.RowKey)}">
-      <span class="grow"><span class="nm">${esc(i.Descr || "(no description)")}</span><span class="s">${esc(i.Title)} · ${esc([i.Package, i.SystemName].filter(Boolean).join(" · "))}${pending(i.RowKey) ? ' · <span class="pend">waiting to send</span>' : ""}</span></span>
-      <span class="tag ${stc(i.ItemStatus)}">${esc(i.ItemStatus || "Open")}</span>${chev}</a>`).join("") || `<div class="empty">No items.</div>`}</div>`;
-  $("#view").querySelectorAll("[data-p]").forEach(b => b.onclick = () => { S.roomPill = b.dataset.p; vRoom(loc); });
+      <div><h1>${esc(r.Room)}</h1><div class="sub">${r.Zone ? "Zone " + esc(r.Zone) + " · " : ""}work owner ${esc(r.WorkOwner || "–")}</div></div>
+      <div style="text-align:right"><div class="pct" style="font-size:30px">${s.p}%</div><div class="sub">room progress</div></div></div>
+    <div class="bar" style="margin-top:10px" aria-hidden="true"><span style="width:${s.p}%;background:var(--navy)"></span></div>
+    <div class="sub" style="font-size:13px;margin-top:6px">${s.c} of ${s.t} activities closed</div>
+    <div class="pills">${discs.map(d => `<button type="button" class="pill ${d === disc ? "sel" : ""}" data-p="${esc(d)}">${esc(d)} · ${items.filter(i => discOf(i) === d).length}</button>`).join("")}</div>
+    <div class="sub" style="font-size:13px;margin-bottom:8px">Tap an activity to log its progress.</div>
+    <div class="list">${shown.map(i => { const live = counted(i), p = pctOf(i); return `<a class="row" href="#/item/${encodeURIComponent(i.RowKey)}">
+      <span class="grow"><span class="nm">${esc(nameOf(i))}</span>
+        <span class="bar thin" aria-hidden="true"><span style="width:${live ? p : 0}%;background:var(--navy)"></span></span>
+        ${pending(i.RowKey) ? '<span class="pend">waiting to send</span>' : ""}</span>
+      <span class="rowr"><b class="pct">${live ? pctTxt(p) : "–"}</b><span class="tag sm ${stc(i.ItemStatus)}">${esc(i.ItemStatus || "Open")}</span></span>${chev}</a>`; }).join("") || `<div class="empty">No activities.</div>`}</div>
+    <div style="margin-top:14px"><a class="big line" href="#/add/${encodeURIComponent(loc)}">＋ Add another works to go item</a></div>`;
+  $("#view").querySelectorAll("[data-p]").forEach(b => b.onclick = () => { S.roomDisc[loc] = b.dataset.p; vRoom(loc); });
 }
 
 function photoPicker(holder, photos, existing) {
@@ -275,47 +298,68 @@ function photoPicker(holder, photos, existing) {
 function vItem(rowKey) {
   setTab("rooms");
   const i = S.items.get(rowKey); if (!i) return vRooms();
-  let status = i.ItemStatus || "Open"; const photos = []; const existing = String(i.PhotoIds || "").split("\n").filter(Boolean);
-  const days = i.TargetDate ? Math.round((new Date(i.TargetDate) - new Date(todayISO())) / 864e5) : null;
+  const was = pctOf(i), st0 = i.ItemStatus || "Open";
+  let pct = was, flag = HOLDS.includes(st0) ? st0 : "";
+  const photos = []; const existing = String(i.PhotoIds || "").split("\n").filter(Boolean);
+  const oldName = i.Activity && i.Descr && i.Descr !== i.Activity ? ` · on the old list as "${esc(i.Descr)}"` : "";
+  const statusNow = () => flag ? flag : pct >= 100 ? "Closed" : pct > 0 ? "In Progress" : (st0 === "In Progress" && pct === was ? "In Progress" : "Open");
   $("#view").innerHTML = `<a class="back" href="#/room/${encodeURIComponent(i.LocationID)}">${backI} ${esc(i.Room)}</a>
     <div class="sub" style="font-family:Consolas,monospace">${esc(i.Title)}${pending(rowKey) ? ' · <span class="pend">change waiting to send</span>' : ""}</div>
-    <h1>${esc(i.Descr || "(no description)")}</h1>
-    <div class="facts">
-      <div><span>Room · zone</span><b>${esc(i.Room)}${i.Zone ? " · " + esc(i.Zone) : ""}</b></div>
-      <div><span>Package · system</span><b>${esc(i.Package || "–")} · ${esc(i.SystemName || "–")}</b></div>
-      <div><span>Work owner · UCB</span><b>${esc(i.WorkOwner || "–")} · ${esc(i.UCBResp || "–")}</b></div>
-      <div><span>Raised</span><b>${fmtD(i.DateRaised) || "–"}</b></div>
-      <div><span>Target</span><b>${fmtD(i.TargetDate) || "–"}</b></div>
-      <div><span>Days to target</span><b>${days === null ? "–" : days + " cd"}</b></div></div>
-    <div class="lab">Status</div><div class="grid g3" id="sts">${STATUSES.map(s => `<button type="button" class="stbtn ${s.replace(/[^A-Za-z]/g, "")}" data-s="${esc(s)}">${esc(s)}</button>`).join("")}</div>
-    <div id="cd" class="where" style="display:none"><span>Closure date</span><b id="cdv"></b></div>
+    <h1 style="font-size:26px">${esc(nameOf(i))}</h1>
+    <div class="sub">${esc(i.Activity ? discOf(i) : [i.Package, i.SystemName].filter(Boolean).join(" · "))}${oldName}</div>
+    <div class="facts three">
+      <div><span>Where</span><b>${esc(SHORT(i.Building))} · ${esc(i.Floor)}${i.Zone ? " · Zone " + esc(i.Zone) : ""}</b></div>
+      <div><span>Work owner</span><b>${esc(i.WorkOwner || "–")}</b></div>
+      <div><span>Target</span><b>${fmtD(i.TargetDate) || "–"}</b></div></div>
+    <div class="lab">Progress</div>
+    <div class="prog">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span class="pctbig" id="pv"></span><span class="tag" id="stg"></span></div>
+      <div id="sl">
+        <input type="range" id="rg" class="rng" min="0" max="100" step="5" value="${Math.round(was / 5) * 5}" aria-label="${esc(nameOf(i))}, % complete">
+        <div class="grid g5" id="qk">${[0, 25, 50, 75, 100].map(v => `<button type="button" class="qk" data-v="${v}">${v}</button>`).join("")}</div>
+      </div>
+      <div class="sub" id="pn" style="font-size:14px;line-height:1.35"></div>
+    </div>
+    <div class="lab">If it cannot move</div>
+    <div class="grid g3" id="hl">${HOLDS.map(h => `<button type="button" class="stbtn ${h.replace(/[^A-Za-z]/g, "")}" data-h="${esc(h)}">${esc(h)}</button>`).join("")}</div>
     <div class="lab" id="phl">Photos</div><div class="photos" id="ph"></div>
     <label class="field"><span class="lab" style="margin:8px 0 0">Comment</span><textarea id="cm" placeholder="What was done, or what's stopping it">${esc(i.Notes || "")}</textarea></label>
     <div style="margin-top:18px"><button class="big navy" id="sv" type="button">Save</button></div>
     <p class="sub" id="why" style="text-align:center"></p>`;
   photoPicker($("#ph"), photos, existing);
   const paint = () => {
-    $("#sts").querySelectorAll("[data-s]").forEach(b => b.classList.toggle("sel", b.dataset.s === status));
-    const closing = status === "Closed";
-    $("#cd").style.display = closing ? "" : "none";
-    $("#cdv").textContent = closing ? (i.ItemStatus === "Closed" && i.ClosureDate ? fmtD(i.ClosureDate) : fmtD(todayISO()) + " (today)") : "";
-    $("#phl").textContent = closing && !existing.length ? "Photo (needed to close)" : "Photos";
-    $("#sv").textContent = closing && i.ItemStatus !== "Closed" ? `Save · close ${i.Title}` : "Save";
+    const status = statusNow(), na = flag === "Not applicable", closing = status === "Closed" && st0 !== "Closed";
+    $("#pv").textContent = na ? "–" : pctTxt(pct);
+    const tg = $("#stg"); tg.className = "tag " + stc(status); tg.textContent = status;
+    $("#sl").style.display = na ? "none" : "";
+    $("#qk").querySelectorAll("[data-v]").forEach(b => b.classList.toggle("sel", +b.dataset.v === pct));
+    $("#hl").querySelectorAll("[data-h]").forEach(b => b.classList.toggle("sel", b.dataset.h === flag));
+    $("#pn").textContent = na ? "Not applicable: this activity is left out of every count and of the room progress."
+      : flag ? `${flag}: progress stays at ${pctTxt(pct)} until it is cleared. Say why in the comment.`
+      : closing ? `Closes today, ${fmtD(todayISO())}. The date goes to the tracker with the save.`
+      : status === "Closed" ? `Closed${i.ClosureDate ? " " + fmtD(i.ClosureDate) : ""}. Slide back to reopen it.`
+      : pct !== was ? `Total done so far. Was ${pctTxt(was)} at the last save.` : "Slide, or tap a figure, to the total % done so far.";
+    $("#phl").textContent = C.photoToClose && closing && !existing.length ? "Photo (needed to close)" : "Photos";
+    $("#sv").textContent = closing ? `Save · close ${i.Title}` : "Save";
   };
-  $("#sts").querySelectorAll("[data-s]").forEach(b => b.onclick = () => { status = b.dataset.s; paint(); });
+  const rg = $("#rg"); rg.oninput = () => { pct = +rg.value; paint(); };
+  $("#qk").querySelectorAll("[data-v]").forEach(b => b.onclick = () => { pct = +b.dataset.v; rg.value = pct; paint(); });
+  $("#hl").querySelectorAll("[data-h]").forEach(b => b.onclick = () => { flag = flag === b.dataset.h ? "" : b.dataset.h; paint(); });
   paint();
   $("#sv").onclick = async () => {
-    const closingNow = status === "Closed" && i.ItemStatus !== "Closed";
-    if (closingNow && !photos.length && !existing.length) { $("#why").textContent = "Take a photo of the finished work to close this item."; toast("Add a photo to close"); return; }
+    const status = statusNow(), closingNow = status === "Closed" && st0 !== "Closed";
+    if (C.photoToClose && closingNow && !photos.length && !existing.length) { $("#why").textContent = "Take a photo of the finished work to close this item."; toast("Add a photo to close"); return; }
     const fields = {}; const note = $("#cm").value.trim();
-    if (status !== (i.ItemStatus || "Open")) fields.ItemStatus = status;
+    if (pct !== was && flag !== "Not applicable") fields.Progress = pct;
+    if (status !== st0) fields.ItemStatus = status;
     if (closingNow) fields.ClosureDate = todayISO();
     if (status !== "Closed" && i.ClosureDate) fields.ClosureDate = null;
     if (note !== (i.Notes || "")) fields.Notes = note;
     if (!Object.keys(fields).length && !photos.length) { history.back(); return; }
     const local = { ...i, ...fields }; S.items.set(rowKey, local); await putOne("items", local);
-    const label = `${i.Title} ${i.Descr || ""}` + (fields.ItemStatus ? ` → ${fields.ItemStatus}` : photos.length ? " · photo added" : " · comment");
-    await queue({ type: "update", rowKey, fields, photos: photos.map(p => ({ blob: p.blob, at: p.at })), label, room: i.Room });
+    const detail = [fields.Progress !== undefined ? `${pctTxt(was)} to ${pctTxt(pct)}` : "", fields.ItemStatus ? (closingNow ? `closed ${fmtD(todayISO())}` : fields.ItemStatus) : "",
+      fields.Notes !== undefined ? "comment" : ""].filter(Boolean).join(" · ") || "photo added";
+    await queue({ type: "update", rowKey, fields, photos: photos.map(p => ({ blob: p.blob, at: p.at })), label: `${i.Room} · ${nameOf(i)}`, detail, room: i.Room });
     toast(navigator.onLine ? "Saved – sending…" : "Saved on this phone – sends when there's signal");
     location.hash = "#/room/" + encodeURIComponent(i.LocationID); sync();
   };
@@ -363,11 +407,11 @@ async function vOutbox() {
   $("#view").innerHTML = `<h1>Outbox</h1>
     ${n ? `<div class="banner warn"><div><b>${n} change${n > 1 ? "s" : ""} saved on this phone</b><br>${navigator.onLine ? "Sending now – keep the app open for a moment." : "There's no signal here. Nothing is lost: they send by themselves when you're back in signal. Carry on working."}</div></div>`
          : `<div class="banner ok"><div><b>Everything is sent.</b><br>Last checked ${S.lastSync ? fmtD(S.lastSync) + " " + hm(S.lastSync) : "–"}.</div></div>`}
-    <div class="lab">Waiting to send</div><div class="list">${S.outbox.slice().reverse().map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.label)}</span><span class="s">${esc(o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""}` : ""}</span></span><span class="pend">Waiting</span></div>`).join("") || `<div class="empty">Nothing waiting.</div>`}</div>
+    <div class="lab">Waiting to send</div><div class="list">${S.outbox.slice().reverse().map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.label)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""}` : ""}</span></span><span class="pend">Waiting</span></div>`).join("") || `<div class="empty">Nothing waiting.</div>`}</div>
     <div class="lab">Sent recently</div><div class="list">${sent.slice(0, 10).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.room || "")}</span></span><span style="color:var(--ok);font-weight:700">Sent</span></div>`).join("") || `<div class="empty">Nothing sent from this phone yet.</div>`}</div>
     <div style="margin-top:14px" class="grid g2"><button class="big line" id="sy" type="button">Sync now</button><button class="big line" id="so" type="button">Sign out</button></div>
     <div class="office"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="color:var(--navy);font-size:18px">Office · Friday close-out</b><span class="sub">${esc(S.user ? S.user.email : "")}</span></div>
-      <p>Exports every item in the same column order as the tracker's Works to Go Register (A to S), ready to paste over it with Paste Values.</p>
+      <p>Exports every activity with its Progress %, status and closure date, under the tracker's column names, for the Friday tracker update.</p>
       <button class="big amber" id="ex" type="button">Export full list to Excel</button></div>
     <p class="sub" style="text-align:center;margin-top:18px">${S.items.size.toLocaleString("en-GB")} items · ${S.rooms.size} rooms on this phone · v${esc(C.version)}</p>`;
   $("#sy").onclick = () => sync(true);
@@ -381,13 +425,14 @@ function loadXlsx() { if (!xlsxP) xlsxP = new Promise((res, rej) => { const s = 
 async function exportXlsx() {
   if (S.outbox.length && !confirm(`${S.outbox.length} change(s) on this phone haven't reached SharePoint yet. Export anyway (they are included)?`)) return;
   await loadXlsx();
-  const H = ["ID","Type","Description","Building","Floor","Room","Zone / Area","Package","System","Work Owner (Contractor / Supplier)","UCB Responsible","UCB Responsible 2","Category","Date Raised","Target Date","Status","Closure Date","Comment","Source (migration)"];
+  const H = ["ID","Type","Description","Building","Floor","Room","Zone / Area","Package","System","Work Owner (Contractor / Supplier)","UCB Responsible","UCB Responsible 2","Category","Date Raised","Target Date","Status","Progress %","Closure Date","Comment","Source (migration)","Activity","Last changed by","Last changed"];
   const d = iso => iso ? new Date(iso) : null;
   const rows = [...S.items.values()].sort((a, b) => String(a.Title).localeCompare(String(b.Title), "en", { numeric: true }))
     .map(i => [i.Title, i.ItemType || "Works to Go", i.Descr || "", i.Building || "", i.Floor || "", i.Room || "", i.Zone || "", i.Package || "", i.SystemName || "",
-      i.WorkOwner || "", i.UCBResp || "", i.UCBResp2 || "", i.Cat || "", d(i.DateRaised), d(i.TargetDate), i.ItemStatus || "", d(i.ClosureDate), i.Notes || "", i.SourceRef || ""]);
+      i.WorkOwner || "", i.UCBResp || "", i.UCBResp2 || "", i.Cat || "", d(i.DateRaised), d(i.TargetDate), i.ItemStatus || "", typeof i.Progress === "number" ? i.Progress : null,
+      d(i.ClosureDate), i.Notes || "", i.SourceRef || "", i.Activity || "", i.LastBy || "", d(i.LastAt)]);
   const ws = XLSX.utils.aoa_to_sheet([H, ...rows], { cellDates: true, dateNF: "d mmm yyyy" });
-  ws["!cols"] = H.map((h, k) => ({ wch: [10, 12, 34, 16, 8, 20, 14, 14, 18, 14, 12, 12, 8, 12, 12, 12, 12, 30, 30][k] }));
+  ws["!cols"] = H.map((h, k) => ({ wch: [10, 12, 34, 16, 8, 20, 14, 14, 18, 14, 12, 12, 8, 12, 12, 12, 11, 12, 30, 30, 28, 26, 12][k] }));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Works to Go Register");
   wb.Props = { Title: "Project Apple – Works to Go export", Author: "Project Central Assurance", Company: "Project Central Assurance" };
   const n = new Date(); const stamp = `${n.getDate()} ${MON[n.getMonth()]} ${n.getFullYear()}`;
@@ -410,6 +455,7 @@ function route() {
 async function start() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(e => console.warn(e));
   await loadLocal(); paintChip();
+  if ((await meta.get("ver")) !== C.version) { await meta.set("deltaItems", null); await meta.set("ver", C.version); }
   try { await initAuth(); } catch (e) { console.error(e); }
   route();
   window.addEventListener("hashchange", route);

@@ -7,5 +7,7 @@ window.APP_CONFIG = {
   itemsList: "WorksToGo",
   roomsList: "Rooms",
   photosList: "Photos",
-  version: "1.0.0"
+  newIdsFrom: 20001,                                     // items raised in the app are numbered from WTG-20001 (the tracker's own numbers run to WTG-19343)
+  photoToClose: false,                                   // true = a photo is needed before an activity can be closed (as in v1.0)
+  version: "1.1.0"
 };
