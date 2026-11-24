@@ -43,6 +43,7 @@ const getAll = store => tx(store, "readonly", s => req(s.getAll()));
 const putMany = (store, arr) => tx(store, "readwrite", s => { arr.forEach(x => s.put(x)); });
 const putOne = (store, v, k) => tx(store, "readwrite", s => req(k === undefined ? s.put(v) : s.put(v, k)));
 const delOne = (store, k) => tx(store, "readwrite", s => req(s.delete(k)));
+const delMany = (store, keys) => tx(store, "readwrite", s => { keys.forEach(k => s.delete(k)); });
 const meta = { get: k => tx("meta", "readonly", s => req(s.get(k))), set: (k, v) => tx("meta", "readwrite", s => req(s.put(v, k))) };
 
 /* ---------------- state ---------------- */
@@ -122,12 +123,37 @@ async function refresh() {
   const changed = [];
   const pend = new Set(S.outbox.map(o => o.rowKey));
   const byId = new Map([...S.items.values()].map(i => [i.spId, i.RowKey]));
-  const onRow = r => { if (!r.RowKey) return; if (pend.has(r.RowKey)) return; S.items.set(r.RowKey, r); changed.push(r); if (changed.length % 200 === 0) { S.phase = `Updating list… ${changed.length.toLocaleString("en-GB")}`; paintChip(); } };
-  const onDel = id => { const k = byId.get(id); if (k && !pend.has(k)) { S.items.delete(k); delOne("items", k); } };
-  try { await pullDelta(site.items, FIELDS, "deltaItems", onRow, onDel); }
-  catch (e) { console.warn("delta failed, full pull", e); await pullAll(site.items, FIELDS, onRow); }
+  const seen = new Set(), gone = [];
+  const onRow = r => { seen.add(r.spId); if (!r.RowKey) return; if (pend.has(r.RowKey)) return; S.items.set(r.RowKey, r); changed.push(r); if (changed.length % 200 === 0) { S.phase = `Updating list… ${changed.length.toLocaleString("en-GB")}`; paintChip(); } };
+  const onDel = id => { const k = byId.get(id); if (k) gone.push(k); };
+  let full;
+  try { full = await pullDelta(site.items, FIELDS, "deltaItems", onRow, onDel); }
+  catch (e) { console.warn("delta failed, full pull", e); await pullAll(site.items, FIELDS, onRow); full = true; }
   await putMany("items", changed);
+  if (full) {                                               // after a whole-list read: rows this phone holds that are no longer on the list
+    const local = [...S.items.values()].filter(i => i.spId), miss = local.filter(i => !seen.has(i.spId));
+    if (seen.size && miss.length <= local.length / 2) { miss.forEach(i => gone.push(i.RowKey)); await meta.set("recon", "1"); }   // more than half missing = the read is not to be trusted: remove nothing
+    else console.warn("list read looks wrong – nothing removed", seen.size, local.length);
+  }
+  if (gone.length) { gone.forEach(k => S.items.delete(k)); await delMany("items", gone); }
+  await prune();
 }
+// a change waiting for a row that has been taken off the list can never be sent: it is set aside, on record, instead of waiting for ever
+async function prune() {
+  const creating = new Set(S.outbox.filter(o => o.type === "create").map(o => o.rowKey));
+  const dead = S.outbox.filter(o => o.type !== "create" && !creating.has(o.rowKey) && !(S.items.get(o.rowKey) || {}).spId);
+  if (!dead.length) return;
+  const log = (await meta.get("unsent")) || [];
+  for (const o of dead) { log.unshift({ at: o.at, what: o.label, detail: o.detail || "", room: o.room || "", photos: o.photos || [], why: "This row is no longer on the list" }); await delOne("outbox", o.qid); }
+  S.outbox = S.outbox.filter(o => !dead.includes(o));
+  await meta.set("unsent", log.slice(0, 300));
+}
+const why = e => { const m = String((e && e.message) || e);
+  return /Graph 403/.test(m) ? "This sign-in is not allowed to change the list – tell the office"
+    : /Graph 404|not on server/.test(m) ? "Row not found on the list"
+    : /Graph 401/.test(m) ? "The sign-in has run out – sign in again"
+    : /timed out|Failed to fetch|Load failed|NetworkError/i.test(m) ? "No answer from SharePoint – will try again"
+    : "Could not send (" + m.slice(0, 60) + ")"; };
 
 /* ---------------- outbox ---------------- */
 async function queue(op) { op.at = new Date().toISOString(); op.by = S.user ? S.user.email : ""; const qid = await putOne("outbox", op); op.qid = qid; S.outbox.push(op); paintChip(); }
@@ -148,10 +174,11 @@ async function sync(manual) {
   if (!navigator.onLine || !account) { if (manual && !navigator.onLine) toast("No signal – changes stay on this phone and send later."); return; }
   S.again = false;
   S.syncing = true; paintChip();
-  let sent = 0, failed = 0;
+  let sent = 0, failed = 0, lost = false;
   try {
     await siteIds();
-    const send = async ops => { for (const op of ops) {
+    const send = async ops => { let k = 0; for (const op of ops) {
+      S.phase = `Sending… ${++k} of ${ops.length}`; paintChip();
       try {
         const item = S.items.get(op.rowKey) || {};
         const urls = op.photos && op.photos.length ? await uploadPhotos(item.Title && !item.Title.startsWith("NEW") ? item.Title : op.rowKey, op.photos) : [];
@@ -169,16 +196,22 @@ async function sync(manual) {
         await delOne("outbox", op.qid); S.outbox = S.outbox.filter(o => o.qid !== op.qid);
         const sentLog = (await meta.get("sent")) || []; sentLog.unshift({ at: new Date().toISOString(), what: op.label, room: op.detail || op.room });
         await meta.set("sent", sentLog.slice(0, 30)); sent++;
-      } catch (e) { console.error(e); failed++; }
+      } catch (e) { console.error(e); failed++; op.err = why(e); if (op.type !== "create" && /Graph 404/.test(String(e.message))) lost = true; }
     } };
     S.phase = "Sending…"; paintChip();
     await send(S.outbox.filter(o => o.type !== "create"));  // changes to existing items go first: they do not need the list refreshed
+    if (lost && !S.reconTried) { S.reconTried = true; await meta.set("deltaItems", null); }   // a row was not found: read the whole list once and drop what is no longer on it
     S.phase = "Updating list…"; paintChip();
+    const before = S.outbox.length;
     await refresh();                                        // fresh numbers before creating new items
+    const setAside = before - S.outbox.length; failed = Math.max(0, failed - setAside);
     const rest = [...S.outbox].filter(o => o.type === "create");
     if (rest.length) { S.phase = "Sending…"; paintChip(); await send(rest); }
     S.lastSync = new Date().toISOString(); await meta.set("lastSync", S.lastSync);
-    if (manual || sent) toast(failed ? `${sent} sent, ${failed} will retry` : sent ? `${sent} change${sent > 1 ? "s" : ""} sent` : "Up to date");
+    const barred = S.outbox.some(o => /not allowed/.test(o.err || ""));
+    if (barred) toast("This sign-in is not allowed to change the list – tell the office", 7000);
+    else if (setAside) toast(`${setAside} change${setAside > 1 ? "s" : ""} set aside: the row${setAside > 1 ? "s are" : " is"} no longer on the list – see Outbox`, 7000);
+    else if (manual || sent) toast(failed ? `${sent} sent, ${failed} will retry` : sent ? `${sent} change${sent > 1 ? "s" : ""} sent` : "Up to date");
   } catch (e) { console.error(e); if (manual) toast("Couldn't reach SharePoint – will try again"); }
   // the screen is redrawn after a sync, except one somebody is filling in (an activity or a new item)
   finally { S.syncing = false; paintChip(); if (!/^#\/(item|add)\//.test(location.hash) && (!document.activeElement || !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))) route(); if (S.again || (sent && S.outbox.length)) setTimeout(() => sync(), 300); }
@@ -410,13 +443,15 @@ function vAdd(loc) {
 
 async function vOutbox() {
   setTab("outbox");
-  const sent = (await meta.get("sent")) || [];
+  const sent = (await meta.get("sent")) || [], unsent = (await meta.get("unsent")) || [];
   const hm = iso => { const d = new Date(iso); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
   const n = S.outbox.length;
   $("#view").innerHTML = `<h1>Outbox</h1>
     ${n ? `<div class="banner warn"><div><b>${n} change${n > 1 ? "s" : ""} saved on this phone</b><br>${navigator.onLine ? "Sending now – keep the app open for a moment." : "There's no signal here. Nothing is lost: they send by themselves when you're back in signal. Carry on working."}</div></div>`
          : `<div class="banner ok"><div><b>Everything is sent.</b><br>Last checked ${S.lastSync ? fmtD(S.lastSync) + " " + hm(S.lastSync) : "–"}.</div></div>`}
-    <div class="lab">Waiting to send</div><div class="list">${S.outbox.slice().reverse().map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.label)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""}` : ""}</span></span><span class="pend">Waiting</span></div>`).join("") || `<div class="empty">Nothing waiting.</div>`}</div>
+    <div class="lab">Waiting to send</div><div class="list">${S.outbox.slice().reverse().map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.label)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""}` : ""}${o.err ? `<br><b style="color:var(--warn,#B4531A)">${esc(o.err)}</b>` : ""}</span></span><span class="pend">Waiting</span></div>`).join("") || `<div class="empty">Nothing waiting.</div>`}</div>
+    ${unsent.length ? `<div class="lab">Not sent – row no longer on the list (${unsent.length})</div><div class="list">${unsent.slice(0, 60).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""} kept on this phone` : ""} · ${fmtD(o.at)}</span></span><span class="pend" style="background:none">Set aside</span></div>`).join("")}</div>
+      <p class="sub">These changes were made to rows that have since been taken off the list in the office, so there is nowhere to send them. Tell the office if any of them matter.</p>` : ""}
     <div class="lab">Sent recently</div><div class="list">${sent.slice(0, 10).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.room || "")}</span></span><span style="color:var(--ok);font-weight:700">Sent</span></div>`).join("") || `<div class="empty">Nothing sent from this phone yet.</div>`}</div>
     <div style="margin-top:14px" class="grid g2"><button class="big line" id="sy" type="button">Sync now</button><button class="big line" id="so" type="button">Sign out</button></div>
     <div class="office"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="color:var(--navy);font-size:18px">Office · Friday close-out</b><span class="sub">${esc(S.user ? S.user.email : "")}</span></div>
@@ -466,6 +501,7 @@ async function start() {
   await loadLocal(); paintChip();
   { const fk = FIELDS.join(","), had = await meta.get("fkey");                                    // a full reload only when the fields change, not at every app update
     if ((had && had !== fk) || (!had && /^1\.0\./.test((await meta.get("ver")) || ""))) await meta.set("deltaItems", null);   // v1.0 phones lack Activity and Progress
+    if (had && (await meta.get("recon")) !== "1") await meta.set("deltaItems", null);              // once, on phones loaded before v1.2.2: a whole-list read, so rows since taken off the list are dropped
     await meta.set("fkey", fk); await meta.set("ver", C.version); }
   try { await initAuth(); } catch (e) { console.error(e); }
   route();
