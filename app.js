@@ -77,7 +77,11 @@ async function token() {
 }
 async function g(path, opt = {}) {
   const t = await token();
-  const r = await fetch(path.startsWith("http") ? path : GRAPH + path, { ...opt, headers: { Authorization: "Bearer " + t, ...(opt.headers || {}) } });
+  const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), opt.method === "PUT" ? 120000 : 90000);   // a stalled request gives up instead of hanging for ever
+  let r;
+  try { r = await fetch(path.startsWith("http") ? path : GRAPH + path, { ...opt, signal: ac.signal, headers: { Authorization: "Bearer " + t, ...(opt.headers || {}) } }); }
+  catch (e) { throw new Error(e.name === "AbortError" ? "No answer from SharePoint (timed out)" : e.message); }
+  finally { clearTimeout(timer); }
   if (r.status === 429 || r.status === 503) { await new Promise(z => setTimeout(z, 3000)); return g(path, opt); }
   if (!r.ok) { const txt = await r.text(); throw new Error(`Graph ${r.status}: ${txt.slice(0, 200)}`); }
   return r.status === 204 ? null : r.json();
@@ -114,11 +118,11 @@ async function pullDelta(listId, keys, metaKey, onRow, onDel) {
 }
 async function refresh() {
   await siteIds();
-  if (!S.rooms.size) { const rooms = []; await pullAll(site.rooms, ROOMF, r => rooms.push(r)); await putMany("rooms", rooms); rooms.forEach(r => S.rooms.set(r.Title, r)); }
+  { const rooms = []; await pullAll(site.rooms, ROOMF, r => rooms.push(r)); await putMany("rooms", rooms); rooms.forEach(r => S.rooms.set(r.Title, r)); }   // every time: new rooms reach phones that already have a room list
   const changed = [];
   const pend = new Set(S.outbox.map(o => o.rowKey));
   const byId = new Map([...S.items.values()].map(i => [i.spId, i.RowKey]));
-  const onRow = r => { if (!r.RowKey) return; if (pend.has(r.RowKey)) return; S.items.set(r.RowKey, r); changed.push(r); };
+  const onRow = r => { if (!r.RowKey) return; if (pend.has(r.RowKey)) return; S.items.set(r.RowKey, r); changed.push(r); if (changed.length % 200 === 0) { S.phase = `Updating list… ${changed.length.toLocaleString("en-GB")}`; paintChip(); } };
   const onDel = id => { const k = byId.get(id); if (k && !pend.has(k)) { S.items.delete(k); delOne("items", k); } };
   try { await pullDelta(site.items, FIELDS, "deltaItems", onRow, onDel); }
   catch (e) { console.warn("delta failed, full pull", e); await pullAll(site.items, FIELDS, onRow); }
@@ -147,8 +151,7 @@ async function sync(manual) {
   let sent = 0, failed = 0;
   try {
     await siteIds();
-    await refresh();                                        // fresh numbers before creating new items
-    for (const op of [...S.outbox]) {
+    const send = async ops => { for (const op of ops) {
       try {
         const item = S.items.get(op.rowKey) || {};
         const urls = op.photos && op.photos.length ? await uploadPhotos(item.Title && !item.Title.startsWith("NEW") ? item.Title : op.rowKey, op.photos) : [];
@@ -167,7 +170,13 @@ async function sync(manual) {
         const sentLog = (await meta.get("sent")) || []; sentLog.unshift({ at: new Date().toISOString(), what: op.label, room: op.detail || op.room });
         await meta.set("sent", sentLog.slice(0, 30)); sent++;
       } catch (e) { console.error(e); failed++; }
-    }
+    } };
+    S.phase = "Sending…"; paintChip();
+    await send(S.outbox.filter(o => o.type !== "create"));  // changes to existing items go first: they do not need the list refreshed
+    S.phase = "Updating list…"; paintChip();
+    await refresh();                                        // fresh numbers before creating new items
+    const rest = [...S.outbox].filter(o => o.type === "create");
+    if (rest.length) { S.phase = "Sending…"; paintChip(); await send(rest); }
     S.lastSync = new Date().toISOString(); await meta.set("lastSync", S.lastSync);
     if (manual || sent) toast(failed ? `${sent} sent, ${failed} will retry` : sent ? `${sent} change${sent > 1 ? "s" : ""} sent` : "Up to date");
   } catch (e) { console.error(e); if (manual) toast("Couldn't reach SharePoint – will try again"); }
@@ -207,7 +216,7 @@ const camI = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke
 
 function paintChip() {
   const ch = $("#netchip"); const n = S.outbox.length;
-  if (S.syncing) { ch.className = "chip busy"; ch.textContent = "Sending…"; }
+  if (S.syncing) { ch.className = "chip busy"; ch.textContent = S.phase || "Sending…"; }
   else if (!navigator.onLine) { ch.className = "chip off"; ch.textContent = `No signal · ${n} waiting`; }
   else { ch.className = n ? "chip off" : "chip on"; ch.textContent = n ? `${n} waiting` : "All sent"; }
   $("#navout").textContent = n ? `Outbox · ${n}` : "Outbox";
@@ -455,7 +464,9 @@ function route() {
 async function start() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(e => console.warn(e));
   await loadLocal(); paintChip();
-  if ((await meta.get("ver")) !== C.version) { await meta.set("deltaItems", null); await meta.set("ver", C.version); }
+  { const fk = FIELDS.join(","), had = await meta.get("fkey");                                    // a full reload only when the fields change, not at every app update
+    if ((had && had !== fk) || (!had && /^1\.0\./.test((await meta.get("ver")) || ""))) await meta.set("deltaItems", null);   // v1.0 phones lack Activity and Progress
+    await meta.set("fkey", fk); await meta.set("ver", C.version); }
   try { await initAuth(); } catch (e) { console.error(e); }
   route();
   window.addEventListener("hashchange", route);
