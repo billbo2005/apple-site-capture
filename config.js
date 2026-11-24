@@ -9,5 +9,5 @@ window.APP_CONFIG = {
   photosList: "Photos",
   newIdsFrom: 30001,                                     // items raised in the app are numbered from WTG-30001 (the tracker's rows, spare ones included, run to WTG-20400)
   photoToClose: false,                                   // true = a photo is needed before an activity can be closed (as in v1.0)
-  version: "1.1.0"
+  version: "1.2.0"
 };

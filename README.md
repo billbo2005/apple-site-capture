@@ -6,3 +6,6 @@ Data lives in Project Central's SharePoint (site *Project Apple Site Capture*: l
 Sign-in is Project Central Microsoft 365 (Entra app *Apple Site Capture*). No data is stored in this repository.
 
 Prepared by Project Central Assurance.
+
+
+**v1.2.0 (24 Nov 2026)** – activity list brought into line with the tracker: BMS is now BMS 1st Fix and BMS 2nd Fix per room (Containment, Cabling, Panel Terminations, Field Terminations and IO Test no longer per room), and Walls 1st Fix and Walls 2nd Fix are added. The app and the tracker work side by side: an app figure is used by the tracker only if it was logged in the week.
