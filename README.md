@@ -8,6 +8,8 @@ Sign-in is Project Central Microsoft 365 (Entra app *Apple Site Capture*). No da
 Prepared by Project Central Assurance.
 
 
+**v1.2.3 (25 Nov 2026)** – on a shared sign-in (listed under `sharedSignIns` in config.js) the app asks 'Who is using this tablet today?' when it opens, once a day, and puts the name on every entry: Last changed by reads 'Name (sign-in address)'. Names used before on the tablet are offered as one-tap buttons; the name can be changed from the Outbox page; an entry already saved keeps the name of the person who saved it. Personal sign-ins are not asked.
+
 **v1.2.2 (24 Nov 2026)** – rows taken off the list in the office are now taken off every phone and tablet (one whole-list read, once, after this update; afterwards through the ordinary small update); a change waiting for a row that is no longer on the list is set aside and kept on record in the Outbox under 'Not sent', instead of waiting for ever; the chip counts while sending ('Sending… 3 of 42'); a change that cannot be sent shows the reason in the Outbox (for example a sign-in that is not allowed to change the list).
 
 **v1.2.1 (24 Nov 2026)** – changes waiting on a phone are sent first, before the list is refreshed, so a slow or stalled refresh cannot hold them up; a request that gets no answer gives up after 90 seconds and is retried; the chip shows 'Updating list…' with a count; the room list is read on every sync so new rooms reach every phone; an app update no longer forces the whole list to be read again.

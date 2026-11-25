@@ -56,7 +56,21 @@ async function loadLocal() {
   S.outbox = await getAll("outbox");
   S.lastSync = await meta.get("lastSync");
   const f = await meta.get("filter"); if (f) S.filter = { ...S.filter, ...f, q: "" };
+  const w = await meta.get("who"); if (w) { S.who = w.name; S.whoDay = w.day; }
+  S.whoNames = (await meta.get("whoNames")) || [];
 }
+/* ---- who is using a shared tablet today ---- */
+const localDay = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`; };
+const isShared = () => !!S.user && (C.sharedSignIns || []).some(x => x.toLowerCase() === String(S.user.email || "").toLowerCase());
+const whoNow = () => (isShared() && S.who && S.whoDay === localDay()) ? S.who : "";
+const needWho = () => isShared() && !whoNow();
+const byLine = () => !S.user ? "" : (whoNow() ? `${whoNow()} (${S.user.email})` : S.user.email);   // goes into 'Last changed by' on every entry
+async function setWho(name) {
+  S.who = name; S.whoDay = localDay();
+  S.whoNames = [name, ...(S.whoNames || []).filter(n => n.toLowerCase() !== name.toLowerCase())].slice(0, 6);
+  await meta.set("who", { name, day: S.whoDay }); await meta.set("whoNames", S.whoNames); paintWho();
+}
+function paintWho() { const el = $(".brand .t2"); if (el) el.textContent = "UCB · works to go" + (whoNow() ? " · " + whoNow() : ""); }
 
 /* ---------------- sign-in ---------------- */
 let pca, account;
@@ -156,7 +170,7 @@ const why = e => { const m = String((e && e.message) || e);
     : "Could not send (" + m.slice(0, 60) + ")"; };
 
 /* ---------------- outbox ---------------- */
-async function queue(op) { op.at = new Date().toISOString(); op.by = S.user ? S.user.email : ""; const qid = await putOne("outbox", op); op.qid = qid; S.outbox.push(op); paintChip(); }
+async function queue(op) { op.at = new Date().toISOString(); op.by = byLine(); const qid = await putOne("outbox", op); op.qid = qid; S.outbox.push(op); paintChip(); }
 function nextId() { let m = (C.newIdsFrom || 1) - 1;       // items raised in the app are numbered clear of the tracker's own numbers
   for (const i of S.items.values()) { const n = /^WTG-(\d+)$/.exec(i.Title || ""); if (n) m = Math.max(m, +n[1]); } return "WTG-" + String(m + 1).padStart(4, "0"); }
 async function uploadPhotos(rowKey, photos) {
@@ -264,6 +278,22 @@ function vSignIn() {
     <button class="big navy" id="si" type="button">Sign in with Microsoft</button>
     <p class="sub" style="margin-top:24px">Tip: on iPhone, tap Share → <b>Add to Home Screen</b> so the app works with no signal.</p></div>`;
   $("#si").onclick = () => navigator.onLine ? signIn() : toast("Sign-in needs signal the first time.");
+}
+function vWho() {
+  if ($("#whoform")) return;                                // already on screen: do not wipe a name being typed
+  setTab("");
+  const names = S.whoNames || [];
+  $("#view").innerHTML = `<div id="whoform"><h1>Who is using this tablet today?</h1>
+    <p class="sub">Your name goes on each entry you log today, so the office knows who to ask about it.</p>
+    ${names.length ? `<div class="lab">Tap your name</div><div class="grid g2" id="wnm">${names.map(n => `<button class="big line" type="button" data-n="${esc(n)}">${esc(n)}</button>`).join("")}</div><div class="lab">Or someone new</div>` : ""}
+    <label class="field"><span class="lab" style="margin:0">First name and surname</span><input id="wn" autocomplete="off" autocapitalize="words" maxlength="40" placeholder="e.g. Sam Jones"></label>
+    <div style="margin-top:14px"><button class="big navy" id="wgo" type="button">Start</button></div></div>`;
+  const go = async name => { name = String(name || "").replace(/\s+/g, " ").trim();
+    if (name.length < 2) { toast("Type your name"); $("#wn").focus(); return; }
+    await setWho(name); $("#whoform").remove(); toast(`Logging as ${name}`); route(); };
+  document.querySelectorAll("#wnm [data-n]").forEach(b => b.onclick = () => go(b.dataset.n));
+  $("#wgo").onclick = () => go($("#wn").value);
+  $("#wn").onkeydown = e => { if (e.key === "Enter") go($("#wn").value); };
 }
 function vLoading(msg) { $("#view").innerHTML = `<div class="empty">${esc(msg)}</div>`; }
 
@@ -423,7 +453,7 @@ function vAdd(loc) {
       <label class="field"><span class="lab" style="margin:0">Target date</span><input id="td" type="date" value="${t14}"></label></div>
     <div class="lab">Photos</div><div class="photos" id="ph"></div>
     <div style="margin-top:18px"><button class="big navy" id="sv" type="button">Save works to go item</button></div>
-    <p class="sub" style="text-align:center">Raised today by ${esc(S.user ? S.user.name : "you")}. The WTG number is given when it reaches SharePoint.</p>`;
+    <p class="sub" style="text-align:center">Raised today by ${esc(whoNow() || (S.user ? S.user.name : "you"))}. The WTG number is given when it reaches SharePoint.</p>`;
   const fillSys = () => { const set = [...(pk.get($("#pk").value) || [])].sort(); $("#sy").innerHTML = `<option value="">–</option>` + set.map(s => `<option>${esc(s)}</option>`).join(""); };
   $("#pk").onchange = fillSys; fillSys();
   photoPicker($("#ph"), photos, []);
@@ -453,6 +483,7 @@ async function vOutbox() {
     ${unsent.length ? `<div class="lab">Not sent – row no longer on the list (${unsent.length})</div><div class="list">${unsent.slice(0, 60).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""} kept on this phone` : ""} · ${fmtD(o.at)}</span></span><span class="pend" style="background:none">Set aside</span></div>`).join("")}</div>
       <p class="sub">These changes were made to rows that have since been taken off the list in the office, so there is nowhere to send them. Tell the office if any of them matter.</p>` : ""}
     <div class="lab">Sent recently</div><div class="list">${sent.slice(0, 10).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.room || "")}</span></span><span style="color:var(--ok);font-weight:700">Sent</span></div>`).join("") || `<div class="empty">Nothing sent from this phone yet.</div>`}</div>
+    ${isShared() ? `<div class="where" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div><span>Using this tablet today</span><b id="whon">${esc(whoNow())}</b></div><button class="big line" id="wc" type="button" style="width:auto;padding:10px 16px">Change</button></div>` : ""}
     <div style="margin-top:14px" class="grid g2"><button class="big line" id="sy" type="button">Sync now</button><button class="big line" id="so" type="button">Sign out</button></div>
     <div class="office"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="color:var(--navy);font-size:18px">Office · Friday close-out</b><span class="sub">${esc(S.user ? S.user.email : "")}</span></div>
       <p>Exports every activity with its Progress %, status and closure date, under the tracker's column names, for the Friday tracker update.</p>
@@ -461,6 +492,7 @@ async function vOutbox() {
   $("#sy").onclick = () => sync(true);
   $("#so").onclick = () => { if (S.outbox.length && !confirm("There are changes not sent yet. Sign out anyway? They stay on this phone.")) return; signOut(); };
   $("#ex").onclick = exportXlsx;
+  if ($("#wc")) $("#wc").onclick = () => { S.whoDay = null; paintWho(); route(); };
 }
 
 /* ---------------- export ---------------- */
@@ -487,6 +519,7 @@ async function exportXlsx() {
 /* ---------------- router ---------------- */
 function route() {
   if (!account) return vSignIn();
+  if (needWho()) return vWho();
   if (!S.rooms.size) return vLoading(navigator.onLine ? "Loading rooms and items for the first time…" : "Connect to signal once to load the rooms.");
   const h = decodeURIComponent(location.hash.slice(1) || "/");
   const [, a, b] = h.split("/");
@@ -504,7 +537,7 @@ async function start() {
     if (had && (await meta.get("recon")) !== "1") await meta.set("deltaItems", null);              // once, on phones loaded before v1.2.2: a whole-list read, so rows since taken off the list are dropped
     await meta.set("fkey", fk); await meta.set("ver", C.version); }
   try { await initAuth(); } catch (e) { console.error(e); }
-  route();
+  paintWho(); route();
   window.addEventListener("hashchange", route);
   window.addEventListener("online", () => { paintChip(); sync(); });
   window.addEventListener("offline", paintChip);
@@ -514,7 +547,7 @@ async function start() {
     sync();
   }
   setInterval(() => { if (navigator.onLine && S.outbox.length) sync(); }, 60000);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && navigator.onLine) sync(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "visible") return; if (needWho()) { paintWho(); route(); } if (navigator.onLine) sync(); });   // a tablet left open overnight asks again in the morning
 }
 start();
 })();

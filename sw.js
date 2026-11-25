@@ -1,5 +1,5 @@
 // Project Apple Site Capture – service worker: keeps the app itself on the phone so it opens with no signal.
-const CACHE = "apple-capture-v1.2.2";
+const CACHE = "apple-capture-v1.2.3";
 const SHELL = ["./", "index.html", "app.css", "app.js", "config.js", "manifest.webmanifest", "vendor/msal-browser.min.js", "vendor/xlsx.full.min.js",
   "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
