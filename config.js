@@ -10,5 +10,5 @@ window.APP_CONFIG = {
   newIdsFrom: 30001,                                     // items raised in the app are numbered from WTG-30001 (the tracker's rows, spare ones included, run to WTG-20400)
   photoToClose: false,                                   // true = a photo is needed before an activity can be closed (as in v1.0)
   sharedSignIns: ["projectappleprogress@projectcentralassurance.com"],   // sign-ins shared by several people: the app asks who is using the tablet each day and puts the name on every entry
-  version: "1.2.3"
+  version: "1.2.4"
 };

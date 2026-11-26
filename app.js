@@ -422,14 +422,15 @@ function vItem(rowKey) {
     const status = statusNow(), closingNow = status === "Closed" && st0 !== "Closed";
     if (C.photoToClose && closingNow && !photos.length && !existing.length) { $("#why").textContent = "Take a photo of the finished work to close this item."; toast("Add a photo to close"); return; }
     const fields = {}; const note = $("#cm").value.trim();
-    if (pct !== was && flag !== "Not applicable") fields.Progress = pct;
+    const firstFigure = typeof i.Progress !== "number" && status !== st0;      // a row with no figure whose status changes (e.g. no longer Not applicable): send the figure too, or the tracker cannot take the status
+    if ((pct !== was || firstFigure) && flag !== "Not applicable") fields.Progress = pct;
     if (status !== st0) fields.ItemStatus = status;
     if (closingNow) fields.ClosureDate = todayISO();
     if (status !== "Closed" && i.ClosureDate) fields.ClosureDate = null;
     if (note !== (i.Notes || "")) fields.Notes = note;
     if (!Object.keys(fields).length && !photos.length) { history.back(); return; }
     const local = { ...i, ...fields }; S.items.set(rowKey, local); await putOne("items", local);
-    const detail = [fields.Progress !== undefined ? `${pctTxt(was)} to ${pctTxt(pct)}` : "", fields.ItemStatus ? (closingNow ? `closed ${fmtD(todayISO())}` : fields.ItemStatus) : "",
+    const detail = [fields.Progress !== undefined && pct !== was ? `${pctTxt(was)} to ${pctTxt(pct)}` : "", fields.ItemStatus ? (closingNow ? `closed ${fmtD(todayISO())}` : fields.ItemStatus) : "",
       fields.Notes !== undefined ? "comment" : ""].filter(Boolean).join(" · ") || "photo added";
     await queue({ type: "update", rowKey, fields, photos: photos.map(p => ({ blob: p.blob, at: p.at })), label: `${i.Room} · ${nameOf(i)}`, detail, room: i.Room });
     toast(navigator.onLine ? "Saved – sending…" : "Saved on this phone – sends when there's signal");
