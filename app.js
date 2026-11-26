@@ -56,19 +56,41 @@ async function loadLocal() {
   S.outbox = await getAll("outbox");
   S.lastSync = await meta.get("lastSync");
   const f = await meta.get("filter"); if (f) S.filter = { ...S.filter, ...f, q: "" };
-  const w = await meta.get("who"); if (w) { S.who = w.name; S.whoDay = w.day; }
+  const w = await meta.get("who"); if (w) { const n = tidyName(w.name); S.who = nameFault(n) ? "" : n; S.whoDay = w.day; S.whoFor = String(w.email || "").toLowerCase(); }   // a name saved by an earlier version is tidied, or asked for again
   S.whoNames = (await meta.get("whoNames")) || [];
 }
-/* ---- who is using a shared tablet today ---- */
+/* ---- whose name goes on the entries ----
+   A shared sign-in (the site tablet) is asked who is using it each day. A personal sign-in uses the account's own name; if the account
+   has none, the app asks once on that device. Either way every entry carries a person's name, never a sign-in address alone. */
 const localDay = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`; };
-const isShared = () => !!S.user && (C.sharedSignIns || []).some(x => x.toLowerCase() === String(S.user.email || "").toLowerCase());
-const whoNow = () => (isShared() && S.who && S.whoDay === localDay()) ? S.who : "";
-const needWho = () => isShared() && !whoNow();
+const email = () => String((S.user && S.user.email) || "").toLowerCase();
+const isShared = () => !!S.user && (C.sharedSignIns || []).some(x => x.toLowerCase() === email());
+/* A typed name, tidied: "MATTHEW_STRANGE" -> "Matthew Strange". Mixed case is left as typed (McDonald, O'Neil). */
+function tidyName(raw) {
+  let n = String(raw || "").replace(/[_.]+/g, " ").replace(/\s+/g, " ").trim();
+  if (n && (n === n.toUpperCase() || n === n.toLowerCase())) n = n.toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+  return n;
+}
+/* "" if the name will do, otherwise what to tell the person. */
+function nameFault(n) {
+  if (!n) return "Type your first name and surname";
+  if (/@/.test(n)) return "Type your name, not an email address";
+  if (/\d/.test(n)) return "A name has no numbers in it";
+  if (!/^[\p{L}'’ -]+$/u.test(n)) return "Use letters only";
+  const words = n.split(" ").filter(w => (w.match(/\p{L}/gu) || []).length >= 2);
+  return words.length >= 2 ? "" : "Type your first name and surname, for example Sam Jones";
+}
+const accountName = () => { const n = tidyName(S.user && S.user.name); return S.user && !nameFault(n) ? n : ""; };   // the Microsoft account's own name, if it is a real one
+const whoNow = () => { if (!S.user) return "";
+  const mine = S.whoFor === email() || (!S.whoFor && isShared());      // names saved before v1.2.5 carry no sign-in: they belong to the shared tablet
+  if (S.who && mine && (!isShared() || S.whoDay === localDay())) return S.who;
+  return isShared() ? "" : accountName(); };
+const needWho = () => !!S.user && (!!S.whoAsk || !whoNow());
 const byLine = () => !S.user ? "" : (whoNow() ? `${whoNow()} (${S.user.email})` : S.user.email);   // goes into 'Last changed by' on every entry
 async function setWho(name) {
-  S.who = name; S.whoDay = localDay();
+  S.who = name; S.whoDay = localDay(); S.whoFor = email(); S.whoAsk = false;
   S.whoNames = [name, ...(S.whoNames || []).filter(n => n.toLowerCase() !== name.toLowerCase())].slice(0, 6);
-  await meta.set("who", { name, day: S.whoDay }); await meta.set("whoNames", S.whoNames); paintWho();
+  await meta.set("who", { name, day: S.whoDay, email: S.whoFor }); await meta.set("whoNames", S.whoNames); paintWho();
 }
 function paintWho() { const el = $(".brand .t2"); if (el) el.textContent = "UCB · works to go" + (whoNow() ? " · " + whoNow() : ""); }
 
@@ -282,15 +304,17 @@ function vSignIn() {
 function vWho() {
   if ($("#whoform")) return;                                // already on screen: do not wipe a name being typed
   setTab("");
-  const names = S.whoNames || [];
-  $("#view").innerHTML = `<div id="whoform"><h1>Who is using this tablet today?</h1>
-    <p class="sub">Your name goes on each entry you log today, so the office knows who to ask about it.</p>
+  const shared = isShared(), names = shared ? (S.whoNames || []).map(tidyName).filter(n => !nameFault(n)) : [];
+  $("#view").innerHTML = `<div id="whoform"><h1>${shared ? "Who is using this tablet today?" : "What is your name?"}</h1>
+    <p class="sub">${shared ? "Your name goes on each entry you log today, so the office knows who to ask about it." : "Your name goes on each entry you log, so the office knows who to ask about it. You are asked once on this device."}</p>
     ${names.length ? `<div class="lab">Tap your name</div><div class="grid g2" id="wnm">${names.map(n => `<button class="big line" type="button" data-n="${esc(n)}">${esc(n)}</button>`).join("")}</div><div class="lab">Or someone new</div>` : ""}
     <label class="field"><span class="lab" style="margin:0">First name and surname</span><input id="wn" autocomplete="off" autocapitalize="words" maxlength="40" placeholder="e.g. Sam Jones"></label>
+    <p class="sub" id="wmsg" role="alert" style="margin:8px 0 0;color:#9A4A12;font-weight:bold" hidden></p>
     <div style="margin-top:14px"><button class="big navy" id="wgo" type="button">Start</button></div></div>`;
-  const go = async name => { name = String(name || "").replace(/\s+/g, " ").trim();
-    if (name.length < 2) { toast("Type your name"); $("#wn").focus(); return; }
+  const go = async raw => { const name = tidyName(raw), fault = nameFault(name);
+    if (fault) { const m = $("#wmsg"); m.textContent = fault + "."; m.hidden = false; toast(fault); $("#wn").focus(); return; }
     await setWho(name); $("#whoform").remove(); toast(`Logging as ${name}`); route(); };
+  if (!shared && whoNow()) $("#wn").value = whoNow();
   document.querySelectorAll("#wnm [data-n]").forEach(b => b.onclick = () => go(b.dataset.n));
   $("#wgo").onclick = () => go($("#wn").value);
   $("#wn").onkeydown = e => { if (e.key === "Enter") go($("#wn").value); };
@@ -484,7 +508,7 @@ async function vOutbox() {
     ${unsent.length ? `<div class="lab">Not sent – row no longer on the list (${unsent.length})</div><div class="list">${unsent.slice(0, 60).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.detail || o.room || "")}${o.photos && o.photos.length ? ` · ${o.photos.length} photo${o.photos.length > 1 ? "s" : ""} kept on this phone` : ""} · ${fmtD(o.at)}</span></span><span class="pend" style="background:none">Set aside</span></div>`).join("")}</div>
       <p class="sub">These changes were made to rows that have since been taken off the list in the office, so there is nowhere to send them. Tell the office if any of them matter.</p>` : ""}
     <div class="lab">Sent recently</div><div class="list">${sent.slice(0, 10).map(o => `<div class="row"><span class="cnt" style="width:52px;text-align:left">${hm(o.at)}</span><span class="grow"><span class="nm">${esc(o.what)}</span><span class="s">${esc(o.room || "")}</span></span><span style="color:var(--ok);font-weight:700">Sent</span></div>`).join("") || `<div class="empty">Nothing sent from this phone yet.</div>`}</div>
-    ${isShared() ? `<div class="where" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div><span>Using this tablet today</span><b id="whon">${esc(whoNow())}</b></div><button class="big line" id="wc" type="button" style="width:auto;padding:10px 16px">Change</button></div>` : ""}
+    <div class="where" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><div><span>${isShared() ? "Using this tablet today" : "Your name on entries"}</span><b id="whon">${esc(whoNow())}</b></div><button class="big line" id="wc" type="button" style="width:auto;padding:10px 16px">Change</button></div>
     <div style="margin-top:14px" class="grid g2"><button class="big line" id="sy" type="button">Sync now</button><button class="big line" id="so" type="button">Sign out</button></div>
     <div class="office"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="color:var(--navy);font-size:18px">Office · Friday close-out</b><span class="sub">${esc(S.user ? S.user.email : "")}</span></div>
       <p>Exports every activity with its Progress %, status and closure date, under the tracker's column names, for the Friday tracker update.</p>
@@ -493,7 +517,7 @@ async function vOutbox() {
   $("#sy").onclick = () => sync(true);
   $("#so").onclick = () => { if (S.outbox.length && !confirm("There are changes not sent yet. Sign out anyway? They stay on this phone.")) return; signOut(); };
   $("#ex").onclick = exportXlsx;
-  if ($("#wc")) $("#wc").onclick = () => { S.whoDay = null; paintWho(); route(); };
+  if ($("#wc")) $("#wc").onclick = () => { S.whoAsk = true; route(); };
 }
 
 /* ---------------- export ---------------- */

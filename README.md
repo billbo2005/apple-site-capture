@@ -8,6 +8,8 @@ Sign-in is Project Central Microsoft 365 (Entra app *Apple Site Capture*). No da
 Prepared by Project Central Assurance.
 
 
+**v1.2.5 (26 Nov 2026)** – every entry now carries a person's name, never a sign-in address alone. The shared tablet still asks who is using it each day; a typed name is tidied ("MATTHEW_STRANGE" becomes "Matthew Strange") and must be a first name and surname. A personal sign-in uses the account's own name, and if the account has none the app asks once on that device. The name can be changed on the Outbox page for any sign-in.
+
 **v1.2.4 (26 Nov 2026)** – when the status of a row with no figure changes (for example it is no longer Not applicable), the app now sends 0% with it. The tracker only takes a status from the app when a figure comes with it, so before this such entries stayed Not applicable on the tracker.
 
 **v1.2.3 (25 Nov 2026)** – on a shared sign-in (listed under `sharedSignIns` in config.js) the app asks 'Who is using this tablet today?' when it opens, once a day, and puts the name on every entry: Last changed by reads 'Name (sign-in address)'. Names used before on the tablet are offered as one-tap buttons; the name can be changed from the Outbox page; an entry already saved keeps the name of the person who saved it. Personal sign-ins are not asked.
